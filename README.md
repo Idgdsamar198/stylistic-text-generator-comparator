@@ -50,6 +50,7 @@ python -m app.cli train --style football                         # LoRA fine-tun
 python -m app.cli generate --style football --prompt "He picks it"
 python -m app.cli compare --style football --prompt "He picks it" --with-base --rate
 python -m app.cli ratings                                        # which model won your ratings
+python -m app.cli evaluate --style football                      # held-out scores, writes results/football.md
 ```
 
 Train each style once (`--style cricket` too). Adapters are saved in `adapters/<style>.pt`, a few hundred KB each
@@ -69,6 +70,42 @@ because only the LoRA weights are stored.
 What to look for: the n-gram model sounds right but copies long runs of the corpus (high `copied_4`) and drifts off
 topic. The base model writes fluent English that is not commentary. The LoRA model picks up the commentary style
 while writing new sentences.
+
+## Results
+
+`python -m app.cli evaluate --style <style>` holds out every 6th passage, trains all four models on the rest, and
+scores them on the passages none of them saw. The unigram model (random words by frequency) is the simple baseline.
+Full output with examples: [results/football.md](results/football.md), [results/cricket.md](results/cricket.md).
+
+| Model | Football: held-out perplexity per word | Cricket: held-out perplexity per word | copied_4 (football / cricket) |
+|---|---|---|---|
+| unigram (simple baseline) | 420.4 | 492.1 | 0.00 / 0.00 |
+| 3-gram | 289.9 | 400.7 | **0.44 / 0.42** |
+| base distilgpt2 (no LoRA) | 249.3 | 896.5 | 0.00 / 0.00 |
+| **LoRA distilgpt2** | **105.9** | **359.0** | 0.01 / 0.01 |
+
+Lower perplexity means the model finds real, unseen commentary more likely. It is measured per word (total
+negative log-likelihood divided by the number of words), so the word-level n-grams and the subword LLM are on the
+same scale. The n-grams score lower-cased text, which slightly favours them.
+
+What this shows:
+
+- **LoRA works.** Training 0.18% of the weights on 40 passages cuts held-out perplexity 2.4x on football and 2.5x
+  on cricket compared with the same model before fine-tuning.
+- **The 3-gram beats the baseline but copies.** It is better than the unigram baseline, yet 42-44% of its 4-word runs
+  are lifted straight from the training text. The LoRA model writes new sentences (1% copied).
+- **The base model does not know the style.** It is fluent but drifts into unrelated text, and on cricket it does
+  worse than even the unigram baseline, because cricket vocabulary (leg before wicket, maiden, yorker) is rare in
+  general English.
+
+Example, prompt "That was plumb, it" (cricket, not in training):
+
+- **3-gram:** That was plumb, it is a beautiful cover drive, timed to perfection, and the pressure is building on the field, and it is a no ball, deceives him completely,
+- **base distilgpt2:** That was plumb, it was a little over a quarter of the way back in March the day before the election and that was when I looked over my arm and I saw a lot of it in a large size.
+- **LoRA distilgpt2:** That was plumb, it was a little over the line...
+
+Limits: the corpus is small (48 passages per style) and the test set is 8 passages, so the numbers are a guide, not
+a benchmark.
 
 ## Tests
 

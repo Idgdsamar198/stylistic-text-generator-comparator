@@ -130,21 +130,24 @@ class NGramModel:
     def passage_nll(self, passage: str) -> float:
         """Negative log-likelihood (nats) of a whole passage, including its end marker.
 
-        For scoring unseen text every order gets a say (interpolation), weighted towards longer contexts, plus a
-        small uniform share so that a word never seen in training still gets a non-zero probability.
+        Unseen text needs smoothing, so this uses Witten-Bell interpolation: a context followed by many different
+        words in training passes more probability down to the shorter context. The shortest level is add-one
+        over the vocabulary plus one slot for unknown words, so nothing gets probability zero.
         """
-        vocab_size = len(self.counts[0][()]) + 1                       # +1 for unknown words
-        weights = [2.0 ** k for k in range(self.n)]
+        unigrams = self.counts[0][()]
+        vocab_size = len(unigrams) + 1
+        n_tokens = sum(unigrams.values())
         tokens = [BOS] * (self.n - 1) + tokenize(passage) + [EOS]
         nll = 0.0
         for i in range(self.n - 1, len(tokens)):
-            seen, total_w = 0.0, 0.01
-            for k in range(self.n):
-                counter = self.counts[k].get(tuple(tokens[i - k:i]) if k else ())
+            word = tokens[i]
+            prob = (unigrams[word] + 1) / (n_tokens + vocab_size)
+            for k in range(1, self.n):
+                counter = self.counts[k].get(tuple(tokens[i - k:i]))
                 if counter:
-                    total_w += weights[k]
-                    seen += weights[k] * counter[tokens[i]] / sum(counter.values())
-            nll -= math.log((seen + 0.01 / vocab_size) / total_w)
+                    total, types = sum(counter.values()), len(counter)
+                    prob = (counter[word] + types * prob) / (total + types)
+            nll -= math.log(prob)
         return nll
 
 

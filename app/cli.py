@@ -142,6 +142,8 @@ def _evaluate(core, args):
     unigram = core.NGramModel(1).fit(train)
     trigram = core.NGramModel(3).fit(train)
     model, tok = core.load_base_model()
+    import torch
+    torch.manual_seed(args.seed)                               # same LoRA starting weights on every run
     core.inject_lora(model, ("c_attn",), r=8, alpha=16)       # B = 0, so this is still exactly the base model
 
     ppl = {"unigram (simple baseline)": core.perplexity_per_word(unigram.passage_nll, test),
