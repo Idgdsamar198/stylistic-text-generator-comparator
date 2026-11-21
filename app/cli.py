@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
     if args.command == "hello":
-        print("Stylistic Text Generator Comparator is ready. Open README.md for your milestones.")
+        print("Stylistic Text Generator Comparator is ready. Try: python -m app.cli corpus")
         return
 
     from app import core
