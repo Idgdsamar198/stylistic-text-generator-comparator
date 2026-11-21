@@ -3,6 +3,8 @@
 The LLM tests use a tiny randomly initialised GPT-2 and a word-level tokenizer built from the corpus, so they run
 in seconds and need no download. `python -m app.cli train` uses the real pre-trained distilgpt2.
 """
+import math
+
 import pytest
 import torch
 from transformers import GPT2Config, GPT2LMHeadModel
@@ -124,3 +126,26 @@ def test_milestone_6(passages):
     report = core.render_comparison(result)
     assert "Prompt: He shoots" in report and "[echo]" in report and "[shout]" in report
     assert "distinct_2=" in report
+
+
+# Held-out evaluation (part of milestone 6): perplexity per word on passages no model trained on.
+def test_held_out_evaluation(tiny, passages):
+    train, test = core.split_corpus(passages)
+    assert len(test) == len(passages) // 6 and not set(train) & set(test)
+
+    trigram = core.NGramModel(3).fit(train)
+    unigram = core.NGramModel(1).fit(train)
+    # an unknown word still gets a finite score, and real commentary scores better than shuffled words
+    assert math.isfinite(trigram.passage_nll("the zorblax shoots ."))
+    shuffled = " ".join(reversed(test[0].split()))
+    assert trigram.passage_nll(test[0]) < trigram.passage_nll(shuffled)
+    # word order matters to the trigram, so it beats the unigram baseline on held-out text
+    assert core.perplexity_per_word(trigram.passage_nll, test) < core.perplexity_per_word(unigram.passage_nll, test)
+
+    model, tok = tiny
+    nll = core.llm_passage_nll(model, tok, test[0])
+    assert nll > 0 and math.isfinite(core.perplexity_per_word(lambda p: core.llm_passage_nll(model, tok, p), test))
+
+    gens = {"a": lambda p, s: p + " one two", "b": lambda p, s: p}
+    summary = core.summarise(core.compare("he shoots", gens, passages, samples=2))
+    assert summary["a"]["words"] == 4 and summary["b"]["words"] == 2

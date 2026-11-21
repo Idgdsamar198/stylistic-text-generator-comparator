@@ -45,6 +45,11 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("ratings", help="show the ratings saved by `compare --rate`")
 
+    p = sub.add_parser("evaluate", help="score every model on held-out passages and write results/<style>.md")
+    _style(p)
+    p.add_argument("--epochs", type=int, default=4)
+    p.add_argument("--seed", type=int, default=0)
+
     args = parser.parse_args(argv)
     if args.command == "hello":
         print("Stylistic Text Generator Comparator is ready. Try: python -m app.cli corpus")
@@ -60,6 +65,9 @@ def main(argv: list[str] | None = None) -> None:
         model = core.NGramModel(args.n).fit(core.load_corpus(args.style))
         for i in range(args.samples):
             print(f"{i + 1}. {model.generate(args.prompt, seed=args.seed + i)}")
+
+    elif args.command == "evaluate":
+        _evaluate(core, args)
 
     elif args.command == "train":
         passages = core.load_corpus(args.style)
@@ -123,6 +131,58 @@ def main(argv: list[str] | None = None) -> None:
             print("No ratings yet. Run `compare --rate`.")
         for (style, winner), n in sorted(Counter((r["style"], r["winner"]) for r in ratings).items()):
             print(f"{style:10} {winner:30} {n}")
+
+
+def _evaluate(core, args):
+    """Train every model on 5/6 of the corpus, then score them on the 1/6 they never saw."""
+    from pathlib import Path
+
+    train, test = core.split_corpus(core.load_corpus(args.style))
+    print(f"{args.style}: {len(train)} training passages, {len(test)} held-out passages")
+    unigram = core.NGramModel(1).fit(train)
+    trigram = core.NGramModel(3).fit(train)
+    model, tok = core.load_base_model()
+    core.inject_lora(model, ("c_attn",), r=8, alpha=16)       # B = 0, so this is still exactly the base model
+
+    ppl = {"unigram (simple baseline)": core.perplexity_per_word(unigram.passage_nll, test),
+           "3-gram": core.perplexity_per_word(trigram.passage_nll, test),
+           "base distilgpt2 (no LoRA)": core.perplexity_per_word(lambda p: core.llm_passage_nll(model, tok, p), test)}
+    base_state = {k: v.clone() for k, v in model.state_dict().items() if "lora_" in k}
+    core.train_lora(model, tok, train, epochs=args.epochs, seed=args.seed, log=print)
+    ppl["LoRA distilgpt2"] = core.perplexity_per_word(lambda p: core.llm_passage_nll(model, tok, p), test)
+    trained_state = {k: v.clone() for k, v in model.state_dict().items() if "lora_" in k}
+
+    def llm(state):
+        def fn(prompt, seed):
+            model.load_state_dict(state, strict=False)
+            return core.generate_llm(model, tok, prompt, seed=seed)
+        return fn
+
+    gens = {"unigram (simple baseline)": lambda p, s: unigram.generate(p, seed=s),
+            "3-gram": lambda p, s: trigram.generate(p, seed=s),
+            "base distilgpt2 (no LoRA)": llm(base_state),
+            "LoRA distilgpt2": llm(trained_state)}
+    prompts = [" ".join(t.split()[:4]) for t in test]           # openings of passages no model trained on
+    runs = [core.compare(p, gens, train, samples=2, seed=args.seed) for p in prompts]
+    stats = {label: {k: round(sum(core.summarise(r)[label][k] for r in runs) / len(runs), 2)
+                     for k in ("words", "distinct_2", "copied_4")} for label in gens}
+
+    lines = [f"## {args.style}", "",
+             f"Trained on {len(train)} passages, scored on {len(test)} held-out passages. Generation numbers average "
+             f"2 samples for each of {len(prompts)} held-out openings.", "",
+             "| Model | Held-out perplexity per word (lower is better) | copied_4 (lower = less copying) "
+             "| distinct_2 | words |", "|---|---|---|---|---|"]
+    for label in gens:
+        s = stats[label]
+        lines.append(f"| {label} | {ppl[label]:.1f} | {s['copied_4']:.2f} | {s['distinct_2']:.2f} | {s['words']:.0f} |")
+    lines += ["", f"Example, prompt \"{prompts[0]}\":", ""]
+    lines += [f"- **{label}:** {runs[0]['results'][label][0]['text']}" for label in gens]
+    report = "\n".join(lines) + "\n"
+    print(report)
+    out = Path("results") / f"{args.style}.md"
+    out.parent.mkdir(exist_ok=True)
+    out.write_text(report, encoding="utf-8")
+    print(f"written to {out}")
 
 
 def _lora(core, style):

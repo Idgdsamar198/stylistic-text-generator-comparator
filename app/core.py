@@ -127,6 +127,26 @@ class NGramModel:
             tokens.append(word)
         return detokenize(tokens)
 
+    def passage_nll(self, passage: str) -> float:
+        """Negative log-likelihood (nats) of a whole passage, including its end marker.
+
+        For scoring unseen text every order gets a say (interpolation), weighted towards longer contexts, plus a
+        small uniform share so that a word never seen in training still gets a non-zero probability.
+        """
+        vocab_size = len(self.counts[0][()]) + 1                       # +1 for unknown words
+        weights = [2.0 ** k for k in range(self.n)]
+        tokens = [BOS] * (self.n - 1) + tokenize(passage) + [EOS]
+        nll = 0.0
+        for i in range(self.n - 1, len(tokens)):
+            seen, total_w = 0.0, 0.01
+            for k in range(self.n):
+                counter = self.counts[k].get(tuple(tokens[i - k:i]) if k else ())
+                if counter:
+                    total_w += weights[k]
+                    seen += weights[k] * counter[tokens[i]] / sum(counter.values())
+            nll -= math.log((seen + 0.01 / vocab_size) / total_w)
+        return nll
+
 
 # --- Milestone 3: Load a small pre-trained LLM and implement LoRA adapter injection. --------------------------
 
@@ -337,6 +357,40 @@ def compare(prompt: str, generators: dict[str, callable], corpus: list[str], sam
         outputs = [fn(prompt, seed + i) for i in range(samples)]
         results[label] = [{"text": t, **text_stats(t, corpus)} for t in outputs]
     return {"prompt": prompt, "results": results}
+
+
+def split_corpus(passages: list[str], every: int = 6) -> tuple[list[str], list[str]]:
+    """Hold out every `every`-th passage for testing: (train, test). The models never see the test passages."""
+    test = passages[every - 1::every]
+    train = [p for i, p in enumerate(passages) if (i + 1) % every]
+    return train, test
+
+
+def word_count(passage: str) -> int:
+    return sum(t not in ".,!?;:" for t in tokenize(passage))
+
+
+@torch.no_grad()
+def llm_passage_nll(model: nn.Module, tokenizer, passage: str) -> float:
+    """NLL (nats) of a passage and its end-of-text token, starting from end-of-text as the only context."""
+    model.eval()
+    ids = torch.tensor([[tokenizer.eos_token_id] + tokenizer.encode(passage) + [tokenizer.eos_token_id]])
+    logits = model(ids[:, :-1]).logits[0]
+    return F.cross_entropy(logits, ids[0, 1:], reduction="sum").item()
+
+
+def perplexity_per_word(nll_fn, passages: list[str]) -> float:
+    """exp(total NLL / total words). Dividing by words, not tokens, makes word and subword models comparable."""
+    return math.exp(sum(nll_fn(p) for p in passages) / sum(word_count(p) for p in passages))
+
+
+def summarise(comparison: dict) -> dict[str, dict]:
+    """Average the text stats of every sample per model."""
+    out = {}
+    for label, samples in comparison["results"].items():
+        out[label] = {k: round(sum(s[k] for s in samples) / len(samples), 2)
+                      for k in ("words", "distinct_2", "copied_4")}
+    return out
 
 
 def render_comparison(comparison: dict, width: int = 88) -> str:
